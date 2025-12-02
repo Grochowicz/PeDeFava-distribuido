@@ -1,6 +1,5 @@
 package network;
 
-import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.raftlog.RaftLog;
@@ -30,11 +29,17 @@ public class MyStateMachine extends BaseStateMachine {
 
     private final SimpleStateMachineStorage storage = new SimpleStateMachineStorage();
 
+    private Node nodeRef;
+
+    public void setNode(Node node) {
+        this.nodeRef = node;
+    }
+
     @Override
     public void initialize(RaftServer server, RaftGroupId groupId, RaftStorage raftStorage) throws IOException {
         super.initialize(server, groupId, raftStorage);
         this.storage.init(raftStorage);
-        loadSnapshot(storage.getLatestSnapshot()); // Tenta carregar snapshot existente ao iniciar
+        loadSnapshot(storage.getLatestSnapshot());
     }
 
     @Override
@@ -68,6 +73,7 @@ public class MyStateMachine extends BaseStateMachine {
                 estoqueGlobal.computeIfAbsent(nodeId, k -> new HashMap<>())
                         .merge(item, qtd, Integer::sum);
                 resposta = "OK";
+                System.out.println("[SM] Estoque atualizado para " + nodeId + ": " + item + " += " + qtd);
 
             } else if (comando.startsWith("COMPRA:")) {
                 String[] p = comando.split(":");
@@ -95,7 +101,19 @@ public class MyStateMachine extends BaseStateMachine {
                     }
                     resposta = "FALHA: Sem estoque";
                 }
+
+            } else if (comando.startsWith("REQ_ADD_MEMBER:")) {
+                if (nodeRef != null) {
+                    String[] p = comando.split(":");
+                    String novoId = p[1];
+                    String novoIp = p[2];
+                    int novaPorta = Integer.parseInt(p[3]);
+
+                    new Thread(() -> nodeRef.adicionarNovoMembro(novoId, novoIp, novaPorta)).start();
+                }
+                resposta = "PROCESSANDO_ENTRADA";
             }
+
         } catch (Exception e) {
             e.printStackTrace();
             resposta = "ERRO: " + e.getMessage();
@@ -124,7 +142,6 @@ public class MyStateMachine extends BaseStateMachine {
 
     @Override
     public long takeSnapshot() {
-        // Pega o índice do último termo aplicado
         TermIndex termIndex = getLastAppliedTermIndex();
         if (termIndex == null) {
             return RaftLog.INVALID_LOG_INDEX;
@@ -179,8 +196,7 @@ public class MyStateMachine extends BaseStateMachine {
             estoqueGlobal.putAll(eg);
 
             setLastAppliedTermIndex(snapshot.getTermIndex());
-
-            System.out.println("Snapshot carregado! Pedidos: " + pedidos.size() + ", Estoque Nodes: " + estoqueGlobal.size());
+            System.out.println("Snapshot carregado! Estoque Global: " + estoqueGlobal);
 
         } catch (ClassNotFoundException e) {
             throw new IOException("Classe não encontrada ao ler snapshot", e);
