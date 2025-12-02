@@ -51,6 +51,18 @@ public class MyStateMachine extends BaseStateMachine {
         return pedidosRestaurante.containsKey(id);
     }
 
+    private void imprimirResumoDoEstoque() {
+        System.out.println("\n===== RESUMO DO ESTOQUE =====");
+        if (estoqueGlobal.isEmpty()) {
+            System.out.println("   (Vazio - Nenhum nó registrou estoque ainda)");
+        } else {
+            estoqueGlobal.forEach((nodeId, itens) -> {
+                System.out.println("   Nodo: " + nodeId + ": " + itens);
+            });
+        }
+        System.out.println();
+    }
+
     @Override
     public CompletableFuture<Message> applyTransaction(TransactionContext trx) {
         LogEntryProto entry = trx.getLogEntry();
@@ -64,17 +76,24 @@ public class MyStateMachine extends BaseStateMachine {
                 pedidosRestaurante.put(novoId, nome);
                 resposta = String.valueOf(novoId);
 
-            } else if (comando.startsWith("ADD_ESTOQUE:")) {
-                String[] p = comando.split(":");
-                String nodeId = p[1];
-                String item = p[2];
-                int qtd = Integer.parseInt(p[3]);
+            }  else if (comando.startsWith("INIT_ESTOQUE:")) {
+                    String[] p = comando.split(":");
+                    String nodeId = p[1];
+                    String item = p[2];
+                    int qtdInicial = Integer.parseInt(p[3]);
 
-                estoqueGlobal.computeIfAbsent(nodeId, k -> new HashMap<>())
-                        .merge(item, qtd, Integer::sum);
-                resposta = "OK";
-                System.out.println("[SM] Estoque atualizado para " + nodeId + ": " + item + " += " + qtd);
+                    Map<String, Integer> estoqueDoNode = estoqueGlobal.computeIfAbsent(nodeId, k -> new HashMap<>());
 
+                    if (!estoqueDoNode.containsKey(item)) {
+                        estoqueDoNode.put(item, qtdInicial);
+                        System.out.println("🆕 Estoque INICIALIZADO para " + nodeId + ": " + item + " = " + qtdInicial);
+                    } else {
+                        // Se já existe, ignoramos (mantém o valor atual, mesmo que seja menor que 50)
+                        System.out.println("ℹ️ Estoque já existe para " + nodeId + ". Mantendo valor atual: " + estoqueDoNode.get(item));
+                    }
+
+                    resposta = "OK";
+                    imprimirResumoDoEstoque();
             } else if (comando.startsWith("COMPRA:")) {
                 String[] p = comando.split(":");
                 int idRest = Integer.parseInt(p[1]);
@@ -101,6 +120,7 @@ public class MyStateMachine extends BaseStateMachine {
                     }
                     resposta = "FALHA: Sem estoque";
                 }
+                imprimirResumoDoEstoque();
 
             } else if (comando.startsWith("REQ_ADD_MEMBER:")) {
                 if (nodeRef != null) {
@@ -197,6 +217,7 @@ public class MyStateMachine extends BaseStateMachine {
 
             setLastAppliedTermIndex(snapshot.getTermIndex());
             System.out.println("Snapshot carregado! Estoque Global: " + estoqueGlobal);
+            imprimirResumoDoEstoque();
 
         } catch (ClassNotFoundException e) {
             throw new IOException("Classe não encontrada ao ler snapshot", e);

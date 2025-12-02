@@ -73,3 +73,4 @@ echo "3. Aguarde alguns segundos para a eleição do líder"
 echo "4. Procure por 'LÍDER!' nos logs para ver qual nó foi eleito"
 echo ""
 
+

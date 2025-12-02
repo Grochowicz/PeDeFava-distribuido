@@ -88,3 +88,4 @@ Depois que um líder for eleito, você pode testar usando o MercadoMiddleware em
 - Certifique-se de que o DNS está rodando na porta 9090
 - Verifique os logs de cada nó para ver erros
 
+

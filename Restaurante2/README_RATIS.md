@@ -128,3 +128,4 @@ Os dados do Ratis (logs e snapshots) são salvos em:
 - Com 2 nós, o sistema funciona mas é menos resiliente
 - O líder sempre se registra no DNS automaticamente quando assume a liderança
 
+

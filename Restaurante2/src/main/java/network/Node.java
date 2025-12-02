@@ -1,5 +1,6 @@
 package network;
 
+import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.server.RaftConfiguration;
 import wsMercado.MercadoServidorImpl;
 import org.apache.ratis.client.RaftClient;
@@ -38,7 +39,7 @@ public class Node {
                 List<String> enderecosVizinhos) {
 
         this.portaInterna = portaInterna;
-        this.portaWebService = 8000 + (portaInterna % 100);
+        this.portaWebService = 9000 + (portaInterna % 100);
         this.dnsClient = new DnsClient(dnsIp, dnsPort);
         this.meuIp = NetworkUtils.getIpAddress();
         this.estoqueInicial = estoqueInicial;
@@ -53,17 +54,14 @@ public class Node {
 
         for (String endereco : enderecosVizinhos) {
             if (endereco.trim().isEmpty()) continue;
-
             String[] partes = endereco.split(":");
             String ipVizinho = partes[0];
             int portaVizinho = Integer.parseInt(partes[1]);
 
             if (ipVizinho.equals(meuIp) && portaVizinho == portaInterna) continue;
 
-            String idVizinho = "n_" + portaVizinho;
-
             this.peersDoCluster.add(RaftPeer.newBuilder()
-                    .setId(idVizinho)
+                    .setId("n_" + portaVizinho)
                     .setAddress(endereco)
                     .build());
         }
@@ -71,6 +69,39 @@ public class Node {
 
     public void iniciar() {
         try {
+            String liderAtual = dnsClient.descobrirLider();
+            boolean souOPrimeiro = (liderAtual == null || liderAtual.startsWith("ERRO"));
+
+            if (!souOPrimeiro) {
+                System.out.println(">>> CLUSTER DETECTADO! Líder atual em: " + liderAtual);
+
+                String[] partes = liderAtual.split(":");
+                String ipLider = partes[0];
+                int portaWebLider = Integer.parseInt(partes[1]);
+                int portaInternaLider = portaWebLider - 6000; // Ex: 9002 -> 3002
+
+                if (portaInternaLider != this.portaInterna) {
+                    System.out.println(">>> Configurando Ratis para iniciar com o líder conhecido...");
+
+                    RaftPeer peerLider = RaftPeer.newBuilder()
+                            .setId("n_" + portaInternaLider)
+                            .setAddress(ipLider + ":" + portaInternaLider)
+                            .build();
+
+                    boolean jaTem = this.peersDoCluster.stream().anyMatch(p -> p.getId().equals(peerLider.getId()));
+                    if (!jaTem) {
+                        this.peersDoCluster.add(peerLider);
+                    }
+                } else {
+                    System.out.println(">>> ALERTA: O DNS aponta para MIM como líder, mas estou reiniciando.");
+                    System.out.println(">>> Vou assumir que sou o líder (Recuperação de falha).");
+                    souOPrimeiro = true; // Força virar líder
+                }
+            }
+            if (souOPrimeiro) {
+                System.out.println(">>> NENHUM LÍDER VÁLIDO DETECTADO. Vou iniciar como LÍDER (Seed).");
+            }
+
             RaftGroup raftGroup = montarGrupoRatis();
             RaftPeerId meuId = RaftPeerId.valueOf(peerIdStr);
 
@@ -91,15 +122,104 @@ public class Node {
 
             this.raftServer.start();
             System.out.println("Ratis Server iniciado em " + meuIp + ":" + portaInterna);
-            System.out.println("Peers conhecidos: " + peersDoCluster.size());
 
             this.raftClient = RaftClient.newBuilder()
                     .setProperties(properties)
                     .setRaftGroup(raftGroup)
                     .build();
 
-            new Thread(this::inicializarEstoqueSimulado).start();
+            if (!souOPrimeiro) {
+                solicitarEntradaNoCluster();
+            }
+
+            // CORREÇÃO CRÍTICA: Monitoramento inicia SEMPRE, para todos os nós
             new Thread(this::monitorarLideranca).start();
+
+            new Thread(this::inicializarEstoqueSimulado).start();
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    public void solicitarEntradaNoCluster() {
+        new Thread(() -> {
+            try {
+                System.out.println(">>> [AUTO-JOIN] Procurando líder no DNS para pedir entrada...");
+
+                String enderecoLiderWeb = null;
+                while (enderecoLiderWeb == null || enderecoLiderWeb.startsWith("ERRO")) {
+                    enderecoLiderWeb = dnsClient.descobrirLider();
+                    if (enderecoLiderWeb == null) Thread.sleep(2000);
+                }
+
+                System.out.println(">>> [AUTO-JOIN] Líder encontrado (WEB): " + enderecoLiderWeb);
+
+                String[] partes = enderecoLiderWeb.split(":");
+                String ipLider = partes[0];
+                int portaWebLider = Integer.parseInt(partes[1]);
+                int portaRatisLider = 3000 + (portaWebLider % 100);
+
+                String enderecoRatisLider = ipLider + ":" + portaRatisLider;
+                System.out.println(">>> [AUTO-JOIN] Tentando conectar no Ratis Líder: " + enderecoRatisLider);
+
+                RaftPeer peerLider = RaftPeer.newBuilder().setId("lider_temp").setAddress(enderecoRatisLider).build();
+                RaftGroup grupoLider = RaftGroup.valueOf(RaftGroupId.valueOf(UUID.fromString("02511d47-d67c-49a3-9011-abb3109a44c1")), peerLider);
+
+                try (RaftClient clientLider = RaftClient.newBuilder()
+                        .setProperties(new RaftProperties())
+                        .setRaftGroup(grupoLider)
+                        .build()) {
+
+                    System.out.println(">>> [AUTO-JOIN] Enviando comando 'REQ_ADD_MEMBER'...");
+                    String cmd = "REQ_ADD_MEMBER:" + peerIdStr + ":" + meuIp + ":" + portaInterna;
+
+                    RaftClientReply reply = clientLider.io().send(Message.valueOf(cmd));
+                    String resp = reply.getMessage().getContent().toString(StandardCharsets.UTF_8);
+
+                    System.out.println(">>> [AUTO-JOIN] Resposta do Líder: " + resp);
+
+                    // A thread de monitoramento já foi iniciada no método iniciar(),
+                    // então não precisamos iniciá-la aqui novamente.
+                }
+
+            } catch (Exception e) {
+                System.err.println("Erro no Auto-Join: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }).start();
+    }
+
+    public void adicionarNovoMembro(String novoId, String novoIp, int novaPorta) {
+        if (!souLider) return;
+
+        try {
+            System.out.println(">>> [ADMIN] Iniciando processo de adição do nó " + novoId);
+
+            RaftConfiguration confAtual = raftServer.getDivision(raftServer.getGroupIds().iterator().next()).getRaftConf();
+            List<RaftPeer> peersAtuais = new ArrayList<>(confAtual.getAllPeers());
+
+            boolean jaExiste = peersAtuais.stream().anyMatch(p -> p.getId().toString().equals(novoId));
+            if (jaExiste) {
+                System.out.println(">>> [ADMIN] Nó " + novoId + " já existe no cluster.");
+                return;
+            }
+
+            RaftPeer novoPeer = RaftPeer.newBuilder()
+                    .setId(novoId)
+                    .setAddress(novoIp + ":" + novaPorta)
+                    .build();
+            peersAtuais.add(novoPeer);
+
+            System.out.println(">>> [ADMIN] Enviando nova configuração para o cluster...");
+            RaftClientReply reply = raftClient.admin().setConfiguration(peersAtuais);
+
+            if (reply.isSuccess()) {
+                System.out.println(">>> [ADMIN] Sucesso! Cluster expandido para " + peersAtuais.size() + " nós.");
+            } else {
+                System.err.println(">>> [ADMIN] Falha ao adicionar nó: " + reply.getException());
+            }
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -109,20 +229,16 @@ public class Node {
     private void inicializarEstoqueSimulado() {
         try {
             Thread.sleep(8000);
-
-            if (this.estoqueInicial == null || this.estoqueInicial.isEmpty()) {
-                System.out.println(">>> [ESTOQUE] Sem estoque inicial configurado.");
-                return;
-            }
+            if (this.estoqueInicial == null || this.estoqueInicial.isEmpty()) return;
 
             for (Map.Entry<String, Integer> item : this.estoqueInicial.entrySet()) {
-                String cmd = "ADD_ESTOQUE:" + peerIdStr + ":" + item.getKey() + ":" + item.getValue();
-                raftClient.io().send(Message.valueOf(cmd));
-                System.out.println(">>> [ESTOQUE] Enviado ao cluster: " + item.getValue() + "x " + item.getKey());
-            }
+                String cmd = "INIT_ESTOQUE:" + peerIdStr + ":" + item.getKey() + ":" + item.getValue();
 
+                raftClient.io().send(Message.valueOf(cmd));
+                System.out.println(">>> [ESTOQUE] Solicitando inicialização: " + item.getKey());
+            }
         } catch (Exception e) {
-            System.err.println("Erro ao registrar estoque (o cluster pode estar sem quorum): " + e.getMessage());
+            System.err.println("Erro estoque: " + e.getMessage());
         }
     }
 
@@ -131,22 +247,57 @@ public class Node {
         return RaftGroup.valueOf(groupId, this.peersDoCluster);
     }
 
+    // --- MÉTODO MONITORAR LIDERANÇA CORRIGIDO ---
     private void monitorarLideranca() {
+        RaftProtos.RaftPeerRole roleAnterior = null;
+        long termoAnterior = -1;
+
         while (true) {
             try {
-                Thread.sleep(2000);
-                if (raftServer.getLifeCycleState() != LifeCycle.State.RUNNING) continue;
+                Thread.sleep(1000); // 1 segundo
 
-                RaftGroupId groupId = raftServer.getGroupIds().iterator().next();
-                boolean souLiderAgora = raftServer.getDivision(groupId).getInfo().isLeader();
+                if (raftServer == null || raftServer.getLifeCycleState() != LifeCycle.State.RUNNING) {
+                    continue;
+                }
+
+                // CORREÇÃO: Usando iterator() pois Iterable não tem isEmpty()
+                Iterable<RaftGroupId> groupIds = raftServer.getGroupIds();
+                if (!groupIds.iterator().hasNext()) continue;
+
+                RaftGroupId groupId = groupIds.iterator().next();
+                RaftServer.Division divisao = raftServer.getDivision(groupId);
+
+                if (divisao == null || divisao.getInfo() == null) continue;
+
+                RaftProtos.RaftPeerRole roleAtual = divisao.getInfo().getCurrentRole();
+                long termoAtual = divisao.getInfo().getCurrentTerm();
+                boolean souLiderAgora = divisao.getInfo().isLeader();
+
+                if (roleAtual != roleAnterior) {
+                    System.out.println(">>> [RAFT CHANGE] Cargo mudou: " +
+                            (roleAnterior == null ? "INICIO" : roleAnterior) +
+                            " ---> " + roleAtual +
+                            " (Termo: " + termoAtual + ")");
+
+                    roleAnterior = roleAtual;
+                }
+
+                if (termoAtual != termoAnterior) {
+                    System.out.println(">>> [RAFT ELECTION] Novo Termo Eleitoral iniciado: " + termoAtual);
+                    termoAnterior = termoAtual;
+                }
 
                 if (souLiderAgora && !this.souLider) {
                     assumirLideranca();
                 } else if (!souLiderAgora && this.souLider) {
                     perderLideranca();
                 }
+
             } catch (Exception e) {
-                // Ignora erros pontuais
+                // Log para garantir que a thread não morreu silenciosamente
+                System.err.println(">>> [MONITOR ERROR] Erro na thread de monitoramento (tentando novamente): " + e.getMessage());
+                e.printStackTrace();
+                try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
             }
         }
     }
@@ -155,24 +306,17 @@ public class Node {
         this.souLider = true;
         System.out.println(">>> [EVENTO] VIREI LÍDER! Iniciando WebService...");
         try {
-            if (endpointAtual != null) {
-                if (endpointAtual.isPublished()) {
-                    endpointAtual.stop();
-                }
-                endpointAtual = null;
-            }
+            if (endpointAtual != null && endpointAtual.isPublished()) endpointAtual.stop();
 
             MercadoServidorImpl implementacaoWs = new MercadoServidorImpl(this);
             String url = "http://" + this.meuIp + ":" + this.portaWebService + "/mercado";
 
             this.endpointAtual = Endpoint.publish(url, implementacaoWs);
-
             System.out.println("Web Service NO AR em: " + url);
             dnsClient.registrarSe("LIDER", this.portaWebService);
 
         } catch (Exception e) {
-            System.err.println("ERRO CRÍTICO AO SUBIR WEB SERVICE: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("ERRO CRÍTICO AO SUBIR WS: " + e.getMessage());
             this.souLider = false;
         }
     }
@@ -196,98 +340,16 @@ public class Node {
         if (!souLider) return false;
         try {
             if (!stateMachine.existeRestaurante(idRestaurante)) return false;
-
             String arrayStr = String.join(",", produtos);
             String comando = "COMPRA:" + idRestaurante + ":" + arrayStr;
-
             RaftClientReply reply = raftClient.io().send(Message.valueOf(comando));
-
             String resp = reply.getMessage().getContent().toString(StandardCharsets.UTF_8);
             return resp.equals("OK");
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
+        } catch (Exception e) { return false; }
     }
 
     public int calcularTempoEntrega(int idRestaurante) {
         if (!stateMachine.existeRestaurante(idRestaurante)) return -1;
         return (new Random().nextInt(10) + 1) * 1000;
-    }
-
-    public void solicitarEntradaNoCluster() {
-        new Thread(() -> {
-            try {
-                System.out.println(">>> [AUTO-JOIN] Procurando líder no DNS para pedir entrada...");
-
-                // 1. Descobre quem é o líder atual
-                String enderecoLider = null;
-                while (enderecoLider == null || enderecoLider.startsWith("ERRO")) {
-                    enderecoLider = dnsClient.descobrirLider();
-                    if (enderecoLider == null) Thread.sleep(1000);
-                }
-
-                System.out.println(">>> [AUTO-JOIN] Líder encontrado: " + enderecoLider);
-
-                String[] partes = enderecoLider.split(":"); // IP:PortaWeb
-
-                RaftPeer peerLider = RaftPeer.newBuilder().setId("lider_temp").setAddress(enderecoLider).build();
-                RaftGroup grupoLider = RaftGroup.valueOf(RaftGroupId.valueOf(UUID.fromString("02511d47-d67c-49a3-9011-abb3109a44c1")), peerLider);
-
-                try (RaftClient clientLider = RaftClient.newBuilder()
-                        .setProperties(new RaftProperties())
-                        .setRaftGroup(grupoLider)
-                        .build()) {
-
-                    RaftPeer eu = RaftPeer.newBuilder().setId(peerIdStr).setAddress(meuIp + ":" + portaInterna).build();
-
-                    System.out.println(">>> [AUTO-JOIN] Enviando comando setConfiguration para o líder...");
-
-                    String cmd = "REQ_ADD_MEMBER:" + peerIdStr + ":" + meuIp + ":" + portaInterna;
-                    RaftClientReply reply = clientLider.io().send(Message.valueOf(cmd));
-
-                    String resp = reply.getMessage().getContent().toString(StandardCharsets.UTF_8);
-                    System.out.println(">>> [AUTO-JOIN] Resposta do Líder: " + resp);
-                }
-
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }).start();
-    }
-
-    public void adicionarNovoMembro(String novoId, String novoIp, int novaPorta) {
-        if (!souLider) return;
-
-        try {
-            System.out.println(">>> [ADMIN] Iniciando processo de adição do nó " + novoId);
-
-            RaftConfiguration confAtual = raftServer.getDivision(raftServer.getGroupIds().iterator().next()).getRaftConf();
-            List<RaftPeer> peersAtuais = new ArrayList<>(confAtual.getAllPeers());
-
-            boolean jaExiste = peersAtuais.stream().anyMatch(p -> p.getId().toString().equals(novoId));
-            if (jaExiste) {
-                System.out.println(">>> [ADMIN] Nó já existe no cluster.");
-                return;
-            }
-
-            RaftPeer novoPeer = RaftPeer.newBuilder()
-                    .setId(novoId)
-                    .setAddress(novoIp + ":" + novaPorta)
-                    .build();
-
-            peersAtuais.add(novoPeer); // Adiciona na lista
-
-            RaftClientReply reply = raftClient.admin().setConfiguration(peersAtuais);
-
-            if (reply.isSuccess()) {
-                System.out.println(">>> [ADMIN] Sucesso! Novo nó " + novoId + " adicionado ao cluster.");
-            } else {
-                System.err.println(">>> [ADMIN] Falha ao adicionar nó: " + reply.getException());
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
     }
 }

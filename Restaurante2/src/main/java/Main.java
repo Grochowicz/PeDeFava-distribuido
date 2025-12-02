@@ -4,33 +4,28 @@ import java.util.*;
 public class Main {
 
     public static void main(String[] args) {
-        // Valores Padrão
         int minhaPorta = 0;
         String ipDns = "127.0.0.1"; // Padrão localhost
-        int portaDns = 9090;        // Porta fixa do DNS
-
-        List<String> vizinhos = new ArrayList<>();
+        int portaDns = 9090;        //  DNS
         Map<String, Integer> estoque = new HashMap<>();
 
-        System.out.println("   INICIALIZADOR DO NÓ (SEMPRE SOLO)");
+        System.out.println("   INICIALIZADOR DO NÓ (AUTO-JOIN)");
 
         if (args.length > 0) {
             try {
                 minhaPorta = Integer.parseInt(args[0]);
 
+                int indiceInicioEstoque = 1;
+
                 if (args.length > 1) {
-                    if (!args[1].contains("=")) {
-                        ipDns = args[1];
-                    } else {
+                    String arg1 = args[1];
+                    if (!arg1.contains("=")) {
+                        ipDns = arg1;
+                        indiceInicioEstoque = 2;
                     }
                 }
 
-                int inicioEstoque = 1;
-                if (args.length > 1 && !args[1].contains("=")) {
-                    inicioEstoque = 2;
-                }
-
-                for (int i = inicioEstoque; i < args.length; i++) {
+                for (int i = indiceInicioEstoque; i < args.length; i++) {
                     String param = args[i];
                     if (param.contains("=")) {
                         String[] partes = param.split("=");
@@ -88,11 +83,10 @@ public class Main {
         System.out.println("\n>>> CONFIGURAÇÃO FINAL:");
         System.out.println("   - Porta Local: " + minhaPorta);
         System.out.println("   - DNS Server : " + ipDns + ":" + portaDns);
-        System.out.println("   - Modo       : SOLO (Auto-Join via DNS)");
         System.out.println("   - Estoque    : " + estoque);
         System.out.println("-----------------------------------------");
 
-        Node node = new Node(ipDns, portaDns, minhaPorta, estoque, vizinhos);
+        Node node = new Node(ipDns, portaDns, minhaPorta, estoque, new ArrayList<>());
         node.iniciar();
 
         try {

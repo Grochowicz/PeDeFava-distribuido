@@ -1,7 +1,6 @@
 import java.net.URL;
 import javax.xml.namespace.QName;
 import javax.xml.ws.Service;
-
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
@@ -10,24 +9,25 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
-import wsMercado.MercadoMiddleware;
+
+// Importante: Importe a INTERFACE
+import wsMercado.MercadoServidor;
 
 import static java.lang.Math.max;
 
-public class Kitchen implements Cozinha{
-    // Que comanda meu pedido pertence
+public class Kitchen implements Cozinha {
+
     Map<Integer, Integer> who = new HashMap<>();
-    // Quais pedidos há num preparo
-    static Map<Integer, ArrayList<String>> pedidos = new HashMap<>();
+    Map<Integer, ArrayList<String>> pedidos = new HashMap<>();
     Map<Integer, Long> fim = new HashMap<>();
     static Map<String, String> ingredienteNecessario = new HashMap<>();
     static Map<String, Integer> estoque = new HashMap<>();
-    private MercadoMiddleware mercadoMiddleware;
-    private int idMercado;
+
+    private MercadoServidor mercadoProxy;
+    private int idRestaurante;
 
     int id = 0;
     Random rng = new Random();
-
 
     public Kitchen() {
         ingredienteNecessario.put("Café", "Pó de Café");
@@ -44,106 +44,107 @@ public class Kitchen implements Cozinha{
         }
 
         try {
-            // Mercado middleware conversa com o dns
-            this.mercadoMiddleware = new MercadoMiddleware();
+            System.out.println("Conectando ao Gateway do Mercado...");
+            URL urlGateway = new URL("http://localhost:9999/mercadoGateway?wsdl");
+            QName qname = new QName("http://wsMercado/", "MercadoGatewayImplService");
+            Service service = Service.create(urlGateway, qname);
+            this.mercadoProxy = service.getPort(MercadoServidor.class);
+            System.out.println(">>> CONECTADO AO GATEWAY!");
 
-            System.out.println("Middleware do Mercado inicializado (DNS configurado).");
+            System.out.println("Cadastrando Cozinha no sistema...");
+            // Envia o nome da cozinha e recebe um ID válido do Raft
+            this.idRestaurante = mercadoProxy.cadastrarPedido("Cozinha_Java_Client");
+            System.out.println(">>> Cadastro Aprovado! ID do Restaurante: " + this.idRestaurante);
 
         } catch (Exception e) {
+            System.err.println("ERRO CRÍTICO: " + e.getMessage());
             e.printStackTrace();
         }
-
     }
 
-    private long Agora(){
-        return System.currentTimeMillis();
-    }
+    private long Agora(){ return System.currentTimeMillis(); }
 
-    private void verificarEstoque(String item) {
-        String ingrediente = ingredienteNecessario.get(item.split(",")[1]);
-        if (ingrediente != null && estoque.get(ingrediente) <= 0) {
-            System.out.println("Verificando estoque e falta");
-            try {
-                System.out.println("Ingrediente em falta: " + ingrediente + ". Solicitando ao mercado...");
-                String[] produtos = {ingrediente};
-                if (mercadoMiddleware.comprarProdutos(ingrediente, 10)) {
-                    // Aguarda a entrega
-                    Thread.sleep(mercadoMiddleware.tempoEntrega());
-                    // Atualiza o estoque
-                    estoque.put(ingrediente, estoque.get(ingrediente) + 10);
-                    System.out.println("Recebido do mercado: " + ingrediente);
+    private void verificarEstoque(String itemStr) {
+        String nomePrato = itemStr.contains(",") ? itemStr.split(",")[1] : itemStr;
+        String ingrediente = ingredienteNecessario.get(nomePrato);
+        if (ingrediente != null && estoque.getOrDefault(ingrediente, 0) <= 0) {
+            System.out.println("--- FALTA: " + ingrediente + " ---");
+
+            boolean conseguiuComprar = false;
+            while (!conseguiuComprar) {
+                try {
+                    System.out.println("Tentando comprar " + ingrediente + "...");
+                    String[] lote = new String[1];
+                    for(int i=0; i<1; i++) lote[i] = ingrediente;
+
+                    conseguiuComprar = mercadoProxy.comprarProdutos(this.idRestaurante, lote);
+
+                    if (conseguiuComprar) {
+                        int tempo = mercadoProxy.tempoEntrega(this.idRestaurante);
+                        System.out.println(">>> Compra Aprovada! Chega em " + tempo/1000 + "s");
+                        Thread.sleep(tempo);
+                        estoque.put(ingrediente, estoque.get(ingrediente) + 1);
+                    } else {
+                        System.err.println(">>> Negado. Tentando de novo em 2s...");
+                        Thread.sleep(2000);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("Erro de conexão (" + e.getMessage() + "). O cluster pode estar elegendo novo líder.");
+                    System.out.println("Tentando de novo em 2s...");
+                    try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                 }
-            } catch (Exception e) {
-                System.err.println("Erro ao comprar do mercado: " + e);
             }
         }
     }
 
     @Override
     public int novoPreparo(int comanda, String[] pedido) throws RemoteException {
+        System.out.println("\nNovo Pedido - Comanda: " + comanda);
         who.put(id,comanda);
         pedidos.put(id, new ArrayList<>());
-        
-        // Verifica e atualiza estoque para cada item do pedido
+
         for(String item : pedido) {
-            // Verifica se precisamos comprar ingredientes
             verificarEstoque(item);
-            
-            // Consome um ingrediente do estoque
-            String ingrediente = ingredienteNecessario.get(item);
+
+            String nomePrato = item.contains(",") ? item.split(",")[1] : item;
+            String ingrediente = ingredienteNecessario.get(nomePrato);
+
             if (ingrediente != null) {
-                int quantidade = estoque.get(ingrediente);
-                estoque.put(ingrediente, quantidade - 1);
-                System.out.println("Usando " + ingrediente + " para preparar " + item + ". Restante: " + (quantidade - 1));
+                int qtd = estoque.get(ingrediente);
+                if (qtd > 0) {
+                    estoque.put(ingrediente, qtd-1 );
+                    System.out.println("Cozinhando: " + nomePrato);
+                }
             }
-            
             pedidos.get(id).add(item);
         }
-        
-        fim.put(id, Agora() + (rng.nextInt(10)+1) *1000);
+
+        fim.put(id, Agora() + (rng.nextInt(5)+2) *1000);
         return id++;
     }
 
     @Override
     public int tempoPreparo(int preparo) throws RemoteException {
-        System.out.println("Tempo de preparo consultado para preparo " + preparo);
+        if (!fim.containsKey(preparo)) return 0;
         return max(0,Math.toIntExact((fim.get(preparo) - Agora())));
     }
 
     @Override
     public String[] pegarPreparo(int preparo) throws RemoteException {
-        if(tempoPreparo(preparo) == 0){
-            String[] arr = new String[pedidos.get(preparo).size()];
-            int i = 0;
-            for(String c : pedidos.get(preparo)){
-                arr[i] = c;
-                i++;
-            }
-            return arr;
+        if(tempoPreparo(preparo) == 0 && pedidos.containsKey(preparo)){
+            return pedidos.get(preparo).toArray(new String[0]);
         }
-
         return new String[0];
     }
 
-
-    // criou um servidor
     public static void main(String[] args){
         try{
             Kitchen obj = new Kitchen();
             Cozinha stub = (Cozinha) UnicastRemoteObject.exportObject(obj, 0);
-
-
             Registry registry = LocateRegistry.createRegistry(2002);
             registry.rebind("main.java.java.Cozinha", stub);
-
-            System.err.println("Servidor main.java.java.Cozinha inicializado!");
-        } catch (Exception e){
-            e.printStackTrace();
-        }
-
+            System.out.println("Cozinha pronta na porta 2002!");
+        } catch (Exception e){ e.printStackTrace(); }
     }
-
-
 }
-
-
