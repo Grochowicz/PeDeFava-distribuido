@@ -1,2 +1,6 @@
 # vim undofile
 .*.un~
+#.class
+*.class
+#ratis logs
+Restaurante/ratis_storage

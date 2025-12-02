@@ -88,8 +88,8 @@ public class MyStateMachine extends BaseStateMachine {
                         estoqueDoNode.put(item, qtdInicial);
                         System.out.println("🆕 Estoque INICIALIZADO para " + nodeId + ": " + item + " = " + qtdInicial);
                     } else {
-                        // Se já existe, ignoramos (mantém o valor atual, mesmo que seja menor que 50)
-                        System.out.println("ℹ️ Estoque já existe para " + nodeId + ". Mantendo valor atual: " + estoqueDoNode.get(item));
+                        // Se já existe, ignora (mantém o atual)
+                        System.out.println("Estoque já existe para " + nodeId + ". Mantendo valor atual: " + estoqueDoNode.get(item));
                     }
 
                     resposta = "OK";
