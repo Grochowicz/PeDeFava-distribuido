@@ -3,7 +3,12 @@ package wsMercado;
 import network.Node;
 import javax.jws.WebService;
 
-@WebService(endpointInterface = "wsMercado.MercadoServidor")
+//@WebService(endpointInterface = "wsMercado.MercadoServidor")
+//@WebService(targetNamespace="http://wsMercado/")
+@WebService(endpointInterface="wsMercado.MercadoServidor",
+            targetNamespace="http://wsMercado/",
+            serviceName="MercadoGatewayImplService",
+            portName="MercadoGatewayImplPort")
 public class MercadoServidorImpl implements MercadoServidor {
 
     private Node node; // Referência ao Nó

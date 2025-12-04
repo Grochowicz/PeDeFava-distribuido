@@ -1,0 +1,2 @@
+#!/bin/bash
+/usr/local/jdk1.8.0_131/bin/java -jar $1
